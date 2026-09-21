@@ -1,9 +1,23 @@
-node_modules/
 .env
 *.log
-generated-invoices/
-__pycache__/
-*.py[cod]
 .DS_Store
 Thumbs.db
+
+# Dart and Flutter tooling
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+coverage/
+*.iml
+.idea/
+
+# Generated platform dependencies and local settings
+frontend/android/.gradle/
+frontend/android/local.properties
+frontend/ios/Pods/
+frontend/ios/.symlinks/
+frontend/ios/Flutter/ephemeral/
+backend/pubspec.lock
 
