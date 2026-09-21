@@ -14,7 +14,7 @@ class AppDatabase {
   static final AppDatabase instance = AppDatabase._();
 
   static const String _databaseName = 'medistock.db';
-  static const int _schemaVersion = 4;
+  static const int _schemaVersion = 5;
   static const int _pinIterations = 50000;
 
   Future<Database>? _databaseFuture;
@@ -22,9 +22,14 @@ class AppDatabase {
   Future<Database> get database => _databaseFuture ??= _openDatabase();
 
   Future<Database> _openDatabase() async {
-    final root = await getDatabasesPath();
+    // The web SQLite adapter stores this database in the browser's IndexedDB.
+    // Its database path is a logical name, not a device filesystem path.
+    const isWeb = bool.fromEnvironment('dart.library.js_interop');
+    final databasePath = isWeb
+        ? _databaseName
+        : path.join(await getDatabasesPath(), _databaseName);
     return openDatabase(
-      path.join(root, _databaseName),
+      databasePath,
       version: _schemaVersion,
       onConfigure: (db) async {
         await db.execute('PRAGMA foreign_keys = ON');
@@ -112,6 +117,7 @@ class AppDatabase {
         );
         await _createOperationsSchema(db);
         await _createCommerceSchema(db);
+        await _createBranchOrdersSchema(db);
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -127,6 +133,9 @@ class AppDatabase {
             'shift',
             "TEXT NOT NULL DEFAULT 'A' CHECK (shift IN ('A', 'B', 'C'))",
           );
+        }
+        if (oldVersion < 5) {
+          await _createBranchOrdersSchema(db);
         }
       },
     );
@@ -334,6 +343,40 @@ class AppDatabase {
     }
   }
 
+  Future<void> _createBranchOrdersSchema(DatabaseExecutor db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS branch_orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_medicine_id INTEGER,
+        medicine_name TEXT NOT NULL,
+        sku TEXT NOT NULL,
+        source_branch TEXT NOT NULL COLLATE NOCASE,
+        destination_branch TEXT NOT NULL COLLATE NOCASE,
+        quantity INTEGER NOT NULL CHECK (quantity > 0),
+        status TEXT NOT NULL DEFAULT 'requested'
+          CHECK (status IN ('requested', 'dispatched', 'received', 'cancelled')),
+        requested_by TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        dispatched_at TEXT,
+        received_at TEXT,
+        cancelled_at TEXT,
+        FOREIGN KEY (source_medicine_id) REFERENCES medicines(id)
+          ON DELETE SET NULL,
+        FOREIGN KEY (source_branch) REFERENCES branches(name),
+        FOREIGN KEY (destination_branch) REFERENCES branches(name)
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_branch_orders_source '
+      'ON branch_orders(source_branch, status)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_branch_orders_destination '
+      'ON branch_orders(destination_branch, status)',
+    );
+  }
+
   Future<void> close() async {
     final pending = _databaseFuture;
     _databaseFuture = null;
@@ -483,14 +526,29 @@ class AppDatabase {
 
   Future<bool> deleteMedicine(int id, {String? branch}) async {
     final db = await database;
-    return await db.delete(
-          'medicines',
-          where: branch == null
-              ? 'id = ?'
-              : 'id = ? AND branch = ? COLLATE NOCASE',
-          whereArgs: <Object?>[id, if (branch != null) branch.trim()],
-        ) >
-        0;
+    return db.transaction((txn) async {
+      final activeOrders = await txn.query(
+        'branch_orders',
+        columns: <String>['id'],
+        where:
+            "source_medicine_id = ? AND status IN ('requested', 'dispatched')",
+        whereArgs: <Object?>[id],
+        limit: 1,
+      );
+      if (activeOrders.isNotEmpty) {
+        throw StateError(
+          'Finish or cancel this medicine’s branch orders first.',
+        );
+      }
+      return await txn.delete(
+            'medicines',
+            where: branch == null
+                ? 'id = ?'
+                : 'id = ? AND branch = ? COLLATE NOCASE',
+            whereArgs: <Object?>[id, if (branch != null) branch.trim()],
+          ) >
+          0;
+    });
   }
 
   Future<List<BranchAvailability>> getBranchAvailability(
@@ -536,6 +594,281 @@ class AppDatabase {
         );
       }),
     );
+  }
+
+  Future<List<BranchOrder>> listBranchOrders({String? branch}) async {
+    final db = await database;
+    final selectedBranch = branch?.trim();
+    final rows = await db.query(
+      'branch_orders',
+      where: selectedBranch == null
+          ? null
+          : 'source_branch = ? COLLATE NOCASE OR '
+                'destination_branch = ? COLLATE NOCASE',
+      whereArgs: selectedBranch == null
+          ? null
+          : <Object?>[selectedBranch, selectedBranch],
+      orderBy: 'created_at DESC, id DESC',
+    );
+    return List<BranchOrder>.unmodifiable(rows.map(BranchOrder.fromMap));
+  }
+
+  Future<BranchOrder?> getBranchOrder(int id) async {
+    final db = await database;
+    final rows = await db.query(
+      'branch_orders',
+      where: 'id = ?',
+      whereArgs: <Object?>[id],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : BranchOrder.fromMap(rows.single);
+  }
+
+  Future<BranchOrder> createBranchOrder({
+    required int sourceMedicineId,
+    required String destinationBranch,
+    required int quantity,
+    required String requestedBy,
+    String? requestingBranch,
+  }) async {
+    if (quantity < 1) throw ArgumentError('Order at least one unit.');
+    final destination = destinationBranch.trim();
+    if (requestingBranch != null &&
+        destination.toLowerCase() != requestingBranch.trim().toLowerCase()) {
+      throw StateError('Staff can only request stock for their own branch.');
+    }
+    final db = await database;
+    return db.transaction((txn) async {
+      final sourceRows = await txn.query(
+        'medicines',
+        where: 'id = ?',
+        whereArgs: <Object?>[sourceMedicineId],
+        limit: 1,
+      );
+      if (sourceRows.isEmpty)
+        throw StateError('Source medicine no longer exists.');
+      final source = Medicine.fromMap(sourceRows.single);
+      if (source.branch.toLowerCase() == destination.toLowerCase()) {
+        throw StateError('Choose a different source branch.');
+      }
+      if (source.stock < quantity) {
+        throw StateError(
+          'Only ${source.stock} units are available at ${source.branch}.',
+        );
+      }
+      final branches = await txn.query(
+        'branches',
+        columns: <String>['name'],
+        where: 'name = ? COLLATE NOCASE AND is_active = 1',
+        whereArgs: <Object?>[destination],
+        limit: 1,
+      );
+      if (branches.isEmpty)
+        throw StateError('Destination branch is not active.');
+      final now = DateTime.now().toIso8601String();
+      final id = await txn.insert('branch_orders', <String, Object?>{
+        'source_medicine_id': sourceMedicineId,
+        'medicine_name': source.name,
+        'sku': source.sku,
+        'source_branch': source.branch,
+        'destination_branch': branches.single['name'],
+        'quantity': quantity,
+        'status': 'requested',
+        'requested_by': requestedBy.trim(),
+        'created_at': now,
+        'updated_at': now,
+      });
+      final rows = await txn.query(
+        'branch_orders',
+        where: 'id = ?',
+        whereArgs: <Object?>[id],
+        limit: 1,
+      );
+      return BranchOrder.fromMap(rows.single);
+    });
+  }
+
+  Future<BranchOrder> dispatchBranchOrder(int id, {String? actorBranch}) async {
+    final db = await database;
+    return db.transaction((txn) async {
+      final rows = await txn.query(
+        'branch_orders',
+        where: 'id = ?',
+        whereArgs: <Object?>[id],
+        limit: 1,
+      );
+      if (rows.isEmpty) throw StateError('Order no longer exists.');
+      final order = BranchOrder.fromMap(rows.single);
+      if (!order.isRequested)
+        throw StateError('Only requested orders can be dispatched.');
+      if (actorBranch != null &&
+          actorBranch.trim().toLowerCase() !=
+              order.sourceBranch.toLowerCase()) {
+        throw StateError('Only the source branch can dispatch this order.');
+      }
+      final sourceId = order.sourceMedicineId;
+      if (sourceId == null)
+        throw StateError('Source medicine no longer exists.');
+      final changed = await txn.rawUpdate(
+        '''UPDATE medicines SET stock = stock - ?, updated_at = ?
+           WHERE id = ? AND branch = ? COLLATE NOCASE
+             AND sku = ? COLLATE NOCASE AND stock >= ?''',
+        <Object?>[
+          order.quantity,
+          DateTime.now().toIso8601String(),
+          sourceId,
+          order.sourceBranch,
+          order.sku,
+          order.quantity,
+        ],
+      );
+      if (changed != 1) {
+        throw StateError(
+          'Source stock changed. Refresh and check availability.',
+        );
+      }
+      final now = DateTime.now().toIso8601String();
+      await txn.update(
+        'branch_orders',
+        <String, Object?>{
+          'status': 'dispatched',
+          'updated_at': now,
+          'dispatched_at': now,
+        },
+        where: 'id = ? AND status = ?',
+        whereArgs: <Object?>[id, 'requested'],
+      );
+      final updated = await txn.query(
+        'branch_orders',
+        where: 'id = ?',
+        whereArgs: <Object?>[id],
+      );
+      return BranchOrder.fromMap(updated.single);
+    });
+  }
+
+  Future<BranchOrder> receiveBranchOrder(int id, {String? actorBranch}) async {
+    final db = await database;
+    return db.transaction((txn) async {
+      final rows = await txn.query(
+        'branch_orders',
+        where: 'id = ?',
+        whereArgs: <Object?>[id],
+        limit: 1,
+      );
+      if (rows.isEmpty) throw StateError('Order no longer exists.');
+      final order = BranchOrder.fromMap(rows.single);
+      if (!order.isDispatched)
+        throw StateError('Dispatch the order before receiving it.');
+      if (actorBranch != null &&
+          actorBranch.trim().toLowerCase() !=
+              order.destinationBranch.toLowerCase()) {
+        throw StateError('Only the destination branch can receive this order.');
+      }
+      final sourceId = order.sourceMedicineId;
+      if (sourceId == null)
+        throw StateError('Source medicine no longer exists.');
+      final sourceRows = await txn.query(
+        'medicines',
+        where: 'id = ?',
+        whereArgs: <Object?>[sourceId],
+        limit: 1,
+      );
+      if (sourceRows.isEmpty)
+        throw StateError('Source medicine no longer exists.');
+      final source = Medicine.fromMap(sourceRows.single);
+      final targetRows = await txn.query(
+        'medicines',
+        where: 'sku = ? COLLATE NOCASE AND branch = ? COLLATE NOCASE',
+        whereArgs: <Object?>[order.sku, order.destinationBranch],
+        orderBy: 'updated_at DESC, id DESC',
+        limit: 1,
+      );
+      final now = DateTime.now().toIso8601String();
+      if (targetRows.isEmpty) {
+        final target = Medicine(
+          barcode: source.barcode,
+          name: source.name,
+          genericName: source.genericName,
+          brandName: source.brandName,
+          composition: source.composition,
+          scheduleCategory: source.scheduleCategory,
+          dosageForm: source.dosageForm,
+          sku: source.sku,
+          manufacturer: source.manufacturer,
+          mfgDate: source.mfgDate,
+          expiryDate: source.expiryDate,
+          branch: order.destinationBranch,
+          stock: order.quantity,
+          reorderThreshold: source.reorderThreshold,
+          costPaise: source.costPaise,
+          pricePaise: source.pricePaise,
+          createdAt: DateTime.now(),
+          updatedAt: DateTime.now(),
+        );
+        await txn.insert('medicines', _medicineValues(target));
+      } else {
+        await txn.rawUpdate(
+          'UPDATE medicines SET stock = stock + ?, updated_at = ? WHERE id = ?',
+          <Object?>[order.quantity, now, targetRows.single['id']],
+        );
+      }
+      await txn.update(
+        'branch_orders',
+        <String, Object?>{
+          'status': 'received',
+          'updated_at': now,
+          'received_at': now,
+        },
+        where: 'id = ? AND status = ?',
+        whereArgs: <Object?>[id, 'dispatched'],
+      );
+      final updated = await txn.query(
+        'branch_orders',
+        where: 'id = ?',
+        whereArgs: <Object?>[id],
+      );
+      return BranchOrder.fromMap(updated.single);
+    });
+  }
+
+  Future<BranchOrder> cancelBranchOrder(int id, {String? actorBranch}) async {
+    final db = await database;
+    return db.transaction((txn) async {
+      final rows = await txn.query(
+        'branch_orders',
+        where: 'id = ?',
+        whereArgs: <Object?>[id],
+        limit: 1,
+      );
+      if (rows.isEmpty) throw StateError('Order no longer exists.');
+      final order = BranchOrder.fromMap(rows.single);
+      if (!order.isRequested)
+        throw StateError('Only requested orders can be cancelled.');
+      final branch = actorBranch?.trim().toLowerCase();
+      if (branch != null &&
+          branch != order.sourceBranch.toLowerCase() &&
+          branch != order.destinationBranch.toLowerCase()) {
+        throw StateError('This order is not for your branch.');
+      }
+      final now = DateTime.now().toIso8601String();
+      await txn.update(
+        'branch_orders',
+        <String, Object?>{
+          'status': 'cancelled',
+          'updated_at': now,
+          'cancelled_at': now,
+        },
+        where: 'id = ? AND status = ?',
+        whereArgs: <Object?>[id, 'requested'],
+      );
+      final updated = await txn.query(
+        'branch_orders',
+        where: 'id = ?',
+        whereArgs: <Object?>[id],
+      );
+      return BranchOrder.fromMap(updated.single);
+    });
   }
 
   Future<int> seedSampleData() async {
@@ -624,6 +957,7 @@ class AppDatabase {
   Future<void> clearAllData() async {
     final db = await database;
     await db.transaction((txn) async {
+      await txn.delete('branch_orders');
       await txn.delete('staff_attendance');
       await txn.delete('staff');
       await txn.delete('purchase_lines');

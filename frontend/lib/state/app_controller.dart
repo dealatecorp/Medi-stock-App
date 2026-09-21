@@ -32,6 +32,7 @@ class AppController extends ChangeNotifier {
   List<InvoiceRecord> _invoices = const [];
   List<Supplier> _suppliers = const [];
   List<PurchaseRecord> _purchases = const [];
+  List<BranchOrder> _branchOrders = const [];
   List<BranchSummary> _branchSummaries = const [];
   List<StaffMember> _staffMembers = const [];
   List<CartItem> _cart = const [];
@@ -59,6 +60,8 @@ class AppController extends ChangeNotifier {
       UnmodifiableListView(_suppliers);
   UnmodifiableListView<PurchaseRecord> get purchases =>
       UnmodifiableListView(_purchases);
+  UnmodifiableListView<BranchOrder> get branchOrders =>
+      UnmodifiableListView(_branchOrders);
   UnmodifiableListView<BranchSummary> get branchSummaries =>
       UnmodifiableListView(_branchSummaries);
   UnmodifiableListView<StaffMember> get staffMembers =>
@@ -67,13 +70,17 @@ class AppController extends ChangeNotifier {
   DashboardStats get stats => _stats;
 
   List<Medicine> get inStockMedicines => _medicines
-      .where((medicine) => medicine.stock > 0)
+      .where((medicine) => medicine.stock > 0 && canEditMedicine(medicine))
       .toList(growable: false);
 
   List<Medicine> get lowStockMedicines => _medicines
-      .where((medicine) => medicine.isLowStock)
+      .where((medicine) => medicine.isLowStock && canEditMedicine(medicine))
       .take(5)
       .toList(growable: false);
+
+  bool canEditMedicine(Medicine medicine) =>
+      staffBranch == null ||
+      medicine.branch.toLowerCase() == staffBranch!.toLowerCase();
 
   List<InvoiceRecord> get recentInvoices =>
       _invoices.take(5).toList(growable: false);
@@ -121,6 +128,7 @@ class AppController extends ChangeNotifier {
     _invoices = const [];
     _suppliers = const [];
     _purchases = const [];
+    _branchOrders = const [];
     _branchSummaries = const [];
     _staffMembers = const [];
     _cart = const [];
@@ -142,6 +150,7 @@ class AppController extends ChangeNotifier {
     _stats = const DashboardStats.empty();
     _suppliers = const [];
     _purchases = const [];
+    _branchOrders = const [];
     _branchSummaries = const [];
     _staffMembers = const [];
     notifyListeners();
@@ -149,7 +158,7 @@ class AppController extends ChangeNotifier {
 
   void selectTab(int index) {
     if (index == _selectedIndex) return;
-    _selectedIndex = index.clamp(0, isAdmin ? 7 : 5).toInt();
+    _selectedIndex = index.clamp(0, isAdmin ? 8 : 6).toInt();
     notifyListeners();
   }
 
@@ -169,10 +178,11 @@ class AppController extends ChangeNotifier {
   Future<void> refresh() async {
     _setBusy(true);
     try {
-      final medicines = await _database.listMedicines(branch: staffBranch);
+      final medicines = await _database.listMedicines();
       final invoices = await _database.listInvoices();
       final suppliers = await _database.listSuppliers();
       final purchases = await _database.listPurchases();
+      final orders = await _database.listBranchOrders(branch: staffBranch);
       final stats = await _database.getDashboardStats(branch: staffBranch);
       final branches = isAdmin
           ? await _database.listBranchSummaries()
@@ -184,6 +194,7 @@ class AppController extends ChangeNotifier {
       _invoices = invoices;
       _suppliers = suppliers;
       _purchases = _visiblePurchases(purchases);
+      _branchOrders = orders;
       _stats = stats;
       _branchSummaries = branches;
       _staffMembers = staff;
@@ -327,7 +338,70 @@ class AppController extends ChangeNotifier {
       _database.getLastPurchaseInfo(medicineId, branch: staffBranch);
 
   Future<List<BranchAvailability>> availabilityFor(int medicineId) =>
-      _database.getBranchAvailability(medicineId, branch: staffBranch);
+      _database.getBranchAvailability(medicineId);
+
+  Future<BranchOrder> requestBranchOrder({
+    required int sourceMedicineId,
+    required String destinationBranch,
+    required int quantity,
+  }) async {
+    _setBusy(true);
+    try {
+      final order = await _database.createBranchOrder(
+        sourceMedicineId: sourceMedicineId,
+        destinationBranch: destinationBranch,
+        quantity: quantity,
+        requestedBy: currentUserName,
+        requestingBranch: staffBranch,
+      );
+      await _reloadWithoutBusyToggle();
+      return order;
+    } finally {
+      _setBusy(false);
+    }
+  }
+
+  Future<BranchOrder> dispatchBranchOrder(int id) async {
+    _setBusy(true);
+    try {
+      final order = await _database.dispatchBranchOrder(
+        id,
+        actorBranch: staffBranch,
+      );
+      await _reloadWithoutBusyToggle();
+      return order;
+    } finally {
+      _setBusy(false);
+    }
+  }
+
+  Future<BranchOrder> receiveBranchOrder(int id) async {
+    _setBusy(true);
+    try {
+      final order = await _database.receiveBranchOrder(
+        id,
+        actorBranch: staffBranch,
+      );
+      await _reloadWithoutBusyToggle();
+      return order;
+    } finally {
+      _setBusy(false);
+    }
+  }
+
+  Future<BranchOrder> cancelBranchOrder(int id) async {
+    _setBusy(true);
+    try {
+      final order = await _database.cancelBranchOrder(
+        id,
+        actorBranch: staffBranch,
+      );
+      await _reloadWithoutBusyToggle();
+      return order;
+    } finally {
+      _setBusy(false);
+    }
+  }
 
   Future<void> setBranchActive(String branch, bool active) async {
     _requireAdmin();
@@ -440,6 +514,7 @@ class AppController extends ChangeNotifier {
           .where((item) => item.medicineId == candidate.id)
           .fold<int>(0, (sum, item) => sum + item.quantity);
       return candidate.id != medicine.id &&
+          canEditMedicine(candidate) &&
           candidate.stock >= quantity + alreadyInCart &&
           _normalizedComposition(candidate.composition) == composition;
     }).toList();
@@ -467,7 +542,7 @@ class AppController extends ChangeNotifier {
     final repeated = <CartItem>[];
     for (final item in invoice.items) {
       final medicine = item.medicineId == null ? null : byId[item.medicineId];
-      if (medicine == null) {
+      if (medicine == null || !canEditMedicine(medicine)) {
         unavailable.add('${item.medicineName} is no longer in stock catalog');
         continue;
       }
@@ -619,10 +694,11 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> _reloadWithoutBusyToggle() async {
-    _medicines = await _database.listMedicines(branch: staffBranch);
+    _medicines = await _database.listMedicines();
     _invoices = await _database.listInvoices();
     _suppliers = await _database.listSuppliers();
     _purchases = _visiblePurchases(await _database.listPurchases());
+    _branchOrders = await _database.listBranchOrders(branch: staffBranch);
     _stats = await _database.getDashboardStats(branch: staffBranch);
     _branchSummaries = isAdmin
         ? await _database.listBranchSummaries()
@@ -659,6 +735,7 @@ class AppController extends ChangeNotifier {
         .where(
           (item) =>
               byId.containsKey(item.medicineId) &&
+              canEditMedicine(byId[item.medicineId]!) &&
               byId[item.medicineId]!.stock > 0,
         )
         .map((item) {

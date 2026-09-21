@@ -345,7 +345,7 @@ void main() {
       await legacy.close();
 
       final upgraded = await AppDatabase.instance.database;
-      expect(await upgraded.getVersion(), 4);
+      expect(await upgraded.getVersion(), 5);
       final medicineColumns = await upgraded.rawQuery(
         'PRAGMA table_info(medicines)',
       );

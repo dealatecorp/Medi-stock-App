@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:medistock_backend/medistock_backend.dart';
@@ -92,6 +94,45 @@ class _BillingScreenState extends State<BillingScreen> {
     final selectedMedicine = products
         .where((medicine) => medicine.id == _selectedMedicineId)
         .firstOrNull;
+    final destinationBranch =
+        widget.controller.staffBranch ?? selectedMedicine?.branch;
+    final requestedQuantity = math.max(1, int.tryParse(_quantity.text) ?? 1);
+    final localStock = selectedMedicine == null || destinationBranch == null
+        ? 0
+        : products
+              .where(
+                (medicine) =>
+                    medicine.branch.toLowerCase() ==
+                        destinationBranch.toLowerCase() &&
+                    medicine.sku.toLowerCase() ==
+                        selectedMedicine.sku.toLowerCase(),
+              )
+              .fold<int>(0, (sum, medicine) => sum + medicine.stock);
+    final inCart = selectedMedicine == null || destinationBranch == null
+        ? 0
+        : widget.controller.cart
+              .where(
+                (item) =>
+                    item.branch.toLowerCase() ==
+                        destinationBranch.toLowerCase() &&
+                    item.sku.toLowerCase() ==
+                        selectedMedicine.sku.toLowerCase(),
+              )
+              .fold<int>(0, (sum, item) => sum + item.quantity);
+    final shortage = math.max(0, requestedQuantity + inCart - localStock);
+    final sourceMedicines =
+        selectedMedicine == null || destinationBranch == null
+        ? const <Medicine>[]
+        : products
+              .where(
+                (medicine) =>
+                    medicine.sku.toLowerCase() ==
+                        selectedMedicine.sku.toLowerCase() &&
+                    medicine.branch.toLowerCase() !=
+                        destinationBranch.toLowerCase() &&
+                    medicine.stock > 0,
+              )
+              .toList(growable: false);
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 10, 16, 116),
@@ -250,7 +291,8 @@ class _BillingScreenState extends State<BillingScreen> {
                                   value: medicine.id,
                                   child: Text(
                                     '${medicine.name} - ${medicine.branch} '
-                                    '(${medicine.stock > 0 ? '${medicine.stock} available' : 'out of stock'})',
+                                    '(${medicine.stock > 0 ? '${medicine.stock} available' : 'out of stock'})'
+                                    '${widget.controller.canEditMedicine(medicine) ? '' : ' · view only'}',
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                   ),
@@ -264,7 +306,25 @@ class _BillingScreenState extends State<BillingScreen> {
                     ),
                     if (selectedMedicine != null) ...[
                       const SizedBox(height: 10),
-                      _MedicineAvailabilityHint(medicine: selectedMedicine),
+                      _MedicineAvailabilityHint(
+                        medicine: selectedMedicine,
+                        canBillHere: widget.controller.canEditMedicine(
+                          selectedMedicine,
+                        ),
+                      ),
+                      if (shortage > 0 && sourceMedicines.isNotEmpty) ...[
+                        const SizedBox(height: 10),
+                        _BranchOrderSuggestions(
+                          destinationBranch: destinationBranch!,
+                          shortage: shortage,
+                          sources: sourceMedicines,
+                          onRequest: (source) => _requestFromBranch(
+                            source,
+                            destinationBranch,
+                            shortage,
+                          ),
+                        ),
+                      ],
                     ],
                     const SizedBox(height: 12),
                     Row(
@@ -272,6 +332,7 @@ class _BillingScreenState extends State<BillingScreen> {
                         Expanded(
                           child: TextField(
                             controller: _quantity,
+                            onChanged: (_) => setState(() {}),
                             keyboardType: TextInputType.number,
                             inputFormatters: [
                               FilteringTextInputFormatter.digitsOnly,
@@ -284,7 +345,13 @@ class _BillingScreenState extends State<BillingScreen> {
                         ),
                         const SizedBox(width: 12),
                         FilledButton.icon(
-                          onPressed: _addItem,
+                          onPressed:
+                              selectedMedicine == null ||
+                                  !widget.controller.canEditMedicine(
+                                    selectedMedicine,
+                                  )
+                              ? null
+                              : _addItem,
                           icon: const Icon(Icons.add_shopping_cart),
                           label: const Text('Add'),
                         ),
@@ -519,6 +586,91 @@ class _BillingScreenState extends State<BillingScreen> {
       helpText: 'Schedule next refill',
     );
     if (picked != null && mounted) setState(() => _nextRefillDate = picked);
+  }
+
+  Future<void> _requestFromBranch(
+    Medicine source,
+    String destinationBranch,
+    int shortage,
+  ) async {
+    final quantityController = TextEditingController(
+      text: '${math.min(shortage, source.stock)}',
+    );
+    String? validationError;
+    try {
+      final quantity = await showDialog<int>(
+        context: context,
+        builder: (dialogContext) => StatefulBuilder(
+          builder: (context, setDialogState) => AlertDialog(
+            title: const Text('Request branch stock'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('${source.name} · ${source.branch} → $destinationBranch'),
+                const SizedBox(height: 8),
+                Text('${source.stock} units available at ${source.branch}.'),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: quantityController,
+                  autofocus: true,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                  decoration: InputDecoration(
+                    labelText: 'Units to request',
+                    errorText: validationError,
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  final amount = int.tryParse(quantityController.text);
+                  if (amount == null || amount < 1 || amount > source.stock) {
+                    setDialogState(
+                      () =>
+                          validationError = 'Enter 1 to ${source.stock} units.',
+                    );
+                    return;
+                  }
+                  Navigator.pop(dialogContext, amount);
+                },
+                child: const Text('Request'),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (quantity == null || !mounted || source.id == null) return;
+      final order = await widget.controller.requestBranchOrder(
+        sourceMedicineId: source.id!,
+        destinationBranch: destinationBranch,
+        quantity: quantity,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            content: Text(
+              'Order #${order.id} requested from ${source.branch}.',
+            ),
+            action: SnackBarAction(
+              label: 'Track',
+              onPressed: () => widget.controller.selectTab(6),
+            ),
+          ),
+        );
+    } catch (error) {
+      if (mounted) _message(_friendlyError(error));
+    } finally {
+      quantityController.dispose();
+    }
   }
 
   Future<void> _addItem() async {
@@ -1022,13 +1174,17 @@ class _BillingScreenState extends State<BillingScreen> {
 }
 
 class _MedicineAvailabilityHint extends StatelessWidget {
-  const _MedicineAvailabilityHint({required this.medicine});
+  const _MedicineAvailabilityHint({
+    required this.medicine,
+    required this.canBillHere,
+  });
 
   final Medicine medicine;
+  final bool canBillHere;
 
   @override
   Widget build(BuildContext context) {
-    final available = medicine.stock > 0;
+    final available = medicine.stock > 0 && canBillHere;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
@@ -1048,7 +1204,11 @@ class _MedicineAvailabilityHint extends StatelessWidget {
           const SizedBox(width: 7),
           Expanded(
             child: Text(
-              available ? '${medicine.stock} units available now' : 'Out of stock. Add will suggest same-composition alternatives.',
+              !canBillHere
+                  ? 'This is another branch’s stock. Request it below or select your branch to bill.'
+                  : available
+                  ? '${medicine.stock} units available now'
+                  : 'Out of stock here. Check other branches below or choose a substitute.',
               style: TextStyle(
                 color: available ? AppColors.success : AppColors.danger,
                 fontSize: 12,
@@ -1056,6 +1216,66 @@ class _MedicineAvailabilityHint extends StatelessWidget {
               ),
             ),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+class _BranchOrderSuggestions extends StatelessWidget {
+  const _BranchOrderSuggestions({
+    required this.destinationBranch,
+    required this.shortage,
+    required this.sources,
+    required this.onRequest,
+  });
+
+  final String destinationBranch;
+  final int shortage;
+  final List<Medicine> sources;
+  final ValueChanged<Medicine> onRequest;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppColors.forestSoft.withValues(alpha: 0.65),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Need $shortage more at $destinationBranch',
+            style: const TextStyle(
+              color: AppColors.forestDark,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 4),
+          const Text(
+            'The same medicine is available at these branches:',
+            style: TextStyle(color: AppColors.muted, fontSize: 12),
+          ),
+          for (final source in sources) ...[
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '${source.branch} · ${source.stock} available',
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
+                TextButton(
+                  onPressed: () => onRequest(source),
+                  child: const Text('Order'),
+                ),
+              ],
+            ),
+          ],
         ],
       ),
     );

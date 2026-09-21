@@ -34,50 +34,54 @@ class _InventoryScreenState extends State<InventoryScreen> {
   Widget build(BuildContext context) {
     final query = _query.trim().toLowerCase();
     final now = DateTime.now();
-    final medicines = widget.controller.medicines
-        .where((medicine) {
-          final matchesText =
-              query.isEmpty ||
-              <String>[
-                medicine.name,
-                medicine.sku,
-                medicine.branch,
-                medicine.brandName,
-                medicine.genericName,
-                medicine.scheduleCategory,
-                medicine.dosageForm,
-              ].join(' ').toLowerCase().contains(query);
-          if (!matchesText) return false;
+    final medicines = widget.controller.medicines.where((medicine) {
+      final matchesText =
+          query.isEmpty ||
+          <String>[
+            medicine.name,
+            medicine.sku,
+            medicine.branch,
+            medicine.brandName,
+            medicine.genericName,
+            medicine.scheduleCategory,
+            medicine.dosageForm,
+          ].join(' ').toLowerCase().contains(query);
+      if (!matchesText) return false;
 
-          final schedule = medicine.scheduleCategory.trim().isEmpty
-              ? 'Unscheduled'
-              : medicine.scheduleCategory;
-          if (_scheduleFilter != 'All schedules' &&
-              schedule != _scheduleFilter) {
-            return false;
-          }
-          final dosage = medicine.dosageForm.trim().isEmpty
-              ? 'Other'
-              : medicine.dosageForm;
-          if (_dosageFilter != 'All forms' && dosage != _dosageFilter) {
-            return false;
-          }
+      final schedule = medicine.scheduleCategory.trim().isEmpty
+          ? 'Unscheduled'
+          : medicine.scheduleCategory;
+      if (_scheduleFilter != 'All schedules' && schedule != _scheduleFilter) {
+        return false;
+      }
+      final dosage = medicine.dosageForm.trim().isEmpty
+          ? 'Other'
+          : medicine.dosageForm;
+      if (_dosageFilter != 'All forms' && dosage != _dosageFilter) {
+        return false;
+      }
 
-          final expiry = medicine.expiryDate;
-          return switch (_expiryFilter) {
-            _ExpiryFilter.all => true,
-            _ExpiryFilter.expired => expiry != null && expiry.isBefore(now),
-            _ExpiryFilter.threeMonths =>
-              expiry != null &&
-                  !expiry.isBefore(now) &&
-                  expiry.isBefore(now.add(const Duration(days: 91))),
-            _ExpiryFilter.sixMonths =>
-              expiry != null &&
-                  !expiry.isBefore(now) &&
-                  expiry.isBefore(now.add(const Duration(days: 183))),
-          };
-        })
-        .toList(growable: false);
+      final expiry = medicine.expiryDate;
+      return switch (_expiryFilter) {
+        _ExpiryFilter.all => true,
+        _ExpiryFilter.expired => expiry != null && expiry.isBefore(now),
+        _ExpiryFilter.threeMonths =>
+          expiry != null &&
+              !expiry.isBefore(now) &&
+              expiry.isBefore(now.add(const Duration(days: 91))),
+        _ExpiryFilter.sixMonths =>
+          expiry != null &&
+              !expiry.isBefore(now) &&
+              expiry.isBefore(now.add(const Duration(days: 183))),
+      };
+    }).toList();
+    if (widget.controller.staffBranch != null) {
+      medicines.sort((first, second) {
+        final firstOwn = widget.controller.canEditMedicine(first) ? 0 : 1;
+        final secondOwn = widget.controller.canEditMedicine(second) ? 0 : 1;
+        return firstOwn.compareTo(secondOwn);
+      });
+    }
 
     return Column(
       children: [
@@ -88,9 +92,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
             onChanged: (value) => setState(() => _query = value),
             textInputAction: TextInputAction.search,
             decoration: InputDecoration(
-              hintText: widget.controller.staffBranch == null
-                  ? 'Search medicine, batch, branch…'
-                  : 'Search medicines in ${widget.controller.staffBranch}',
+              hintText: 'Search medicine, batch, branch…',
               prefixIcon: const Icon(Icons.search),
               suffixIcon: _query.isEmpty
                   ? null
@@ -119,6 +121,14 @@ class _InventoryScreenState extends State<InventoryScreen> {
           }),
         ),
         const SizedBox(height: 8),
+        if (widget.controller.staffBranch != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+            child: Text(
+              'Other branches are view-only. You can change stock only at ${widget.controller.staffBranch}.',
+              style: const TextStyle(color: AppColors.muted, fontSize: 12),
+            ),
+          ),
         Expanded(
           child: medicines.isEmpty
               ? EmptyState(
@@ -149,6 +159,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
                       final medicine = medicines[index];
                       return _MedicineCard(
                         medicine: medicine,
+                        canEdit: widget.controller.canEditMedicine(medicine),
                         onAvailability: () =>
                             _showAvailability(context, medicine),
                         onEdit: () => showMedicineFormSheet(
@@ -479,12 +490,14 @@ class _FilterMenu<T> extends StatelessWidget {
 class _MedicineCard extends StatelessWidget {
   const _MedicineCard({
     required this.medicine,
+    required this.canEdit,
     required this.onAvailability,
     required this.onEdit,
     required this.onDelete,
   });
 
   final Medicine medicine;
+  final bool canEdit;
   final VoidCallback onAvailability;
   final VoidCallback onEdit;
   final VoidCallback onDelete;
@@ -541,6 +554,11 @@ class _MedicineCard extends StatelessWidget {
                 runSpacing: 8,
                 children: [
                   _InfoChip(icon: Icons.store_outlined, label: medicine.branch),
+                  if (!canEdit)
+                    const _InfoChip(
+                      icon: Icons.lock_outline_rounded,
+                      label: 'View only',
+                    ),
                   _InfoChip(
                     icon: Icons.shopping_cart_outlined,
                     label: 'Cost ${formatMoney(medicine.costPaise)}',
@@ -577,17 +595,19 @@ class _MedicineCard extends StatelessWidget {
                     label: const Text('Branches'),
                   ),
                   const Spacer(),
-                  IconButton(
-                    tooltip: 'Edit',
-                    onPressed: onEdit,
-                    icon: const Icon(Icons.edit_outlined),
-                  ),
-                  IconButton(
-                    tooltip: 'Delete',
-                    color: AppColors.danger,
-                    onPressed: onDelete,
-                    icon: const Icon(Icons.delete_outline),
-                  ),
+                  if (canEdit) ...[
+                    IconButton(
+                      tooltip: 'Edit',
+                      onPressed: onEdit,
+                      icon: const Icon(Icons.edit_outlined),
+                    ),
+                    IconButton(
+                      tooltip: 'Delete',
+                      color: AppColors.danger,
+                      onPressed: onDelete,
+                      icon: const Icon(Icons.delete_outline),
+                    ),
+                  ],
                 ],
               ),
             ],
@@ -638,6 +658,12 @@ Future<void> showMedicineFormSheet(
   AppController controller, {
   Medicine? medicine,
 }) async {
+  if (medicine != null && !controller.canEditMedicine(medicine)) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Other branch stock is view-only.')),
+    );
+    return;
+  }
   final saved = await showModalBottomSheet<Medicine>(
     context: context,
     isScrollControlled: true,

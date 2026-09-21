@@ -20,6 +20,11 @@ does not require MySQL, an application server, or an internet connection.
 - Camera barcode scanning with manual barcode entry as a fallback.
 - Branch availability for matching medicine batch/codes, including branch
   distance and quantity.
+- Staff can inspect stock at every branch, but edits and billing remain limited
+  to their assigned branch.
+- Billing suggests another branch when matching local stock is short. Staff can
+  request units, then track requested, dispatched, received, or cancelled
+  transfers from Orders. Dispatch and receipt change stock atomically.
 - Admin-only branch monitoring with active/inactive controls, inventory value,
   stock health, assigned staff, and today's check-in statistics.
 - Admin-only staff management with add, edit, deactivate, delete, branch/role
@@ -56,8 +61,8 @@ day's attendance.
 
 ## Offline storage
 
-Medicines, suppliers, purchase drafts, invoices, invoice items, branch status,
-staff accounts, attendance, and sample data are stored in an SQLite database on
+Medicines, suppliers, purchase drafts, invoices, invoice items, branch orders,
+branch status, staff accounts, attendance, and sample data are stored in an SQLite database on
 the device. Admin login state is also stored locally. No MySQL instance,
 backend server, or network connection is required for the core workflows.
 

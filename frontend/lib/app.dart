@@ -73,7 +73,10 @@ class _MediStockBootstrapState extends State<MediStockBootstrap> {
         return;
       }
       setState(() => _controller = controller);
-    } catch (error) {
+      debugPrint('MediStock workspace ready');
+    } catch (error, stackTrace) {
+      debugPrint('Workspace initialization failed: $error');
+      debugPrintStack(stackTrace: stackTrace);
       pendingController?.dispose();
       if (!mounted) return;
       setState(() => _startupError = error);

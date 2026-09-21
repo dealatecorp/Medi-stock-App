@@ -672,6 +672,67 @@ class BranchAvailability {
   String get distanceLabel => isCurrent ? 'Current' : '${distanceKm ?? 0} km';
 }
 
+/// A request to move medicine stock between branches on this device.
+class BranchOrder {
+  const BranchOrder({
+    required this.id,
+    required this.sourceMedicineId,
+    required this.medicineName,
+    required this.sku,
+    required this.sourceBranch,
+    required this.destinationBranch,
+    required this.quantity,
+    required this.status,
+    required this.requestedBy,
+    required this.createdAt,
+    required this.updatedAt,
+    this.dispatchedAt,
+    this.receivedAt,
+    this.cancelledAt,
+  });
+
+  final int id;
+  final int? sourceMedicineId;
+  final String medicineName;
+  final String sku;
+  final String sourceBranch;
+  final String destinationBranch;
+  final int quantity;
+  final String status;
+  final String requestedBy;
+  final DateTime createdAt;
+  final DateTime updatedAt;
+  final DateTime? dispatchedAt;
+  final DateTime? receivedAt;
+  final DateTime? cancelledAt;
+
+  bool get isRequested => status == 'requested';
+  bool get isDispatched => status == 'dispatched';
+  bool get isReceived => status == 'received';
+  bool get isCancelled => status == 'cancelled';
+
+  factory BranchOrder.fromMap(Map<String, Object?> map) => BranchOrder(
+    id: _int(map['id']),
+    sourceMedicineId: _nullableInt(map['source_medicine_id']),
+    medicineName: _string(map['medicine_name']),
+    sku: _string(map['sku']),
+    sourceBranch: _string(map['source_branch']),
+    destinationBranch: _string(map['destination_branch']),
+    quantity: _int(map['quantity']),
+    status: _string(map['status']),
+    requestedBy: _string(map['requested_by']),
+    createdAt:
+        _nullableDateTime(map['created_at']) ??
+        DateTime.fromMillisecondsSinceEpoch(0),
+    updatedAt:
+        _nullableDateTime(map['updated_at']) ??
+        DateTime.fromMillisecondsSinceEpoch(0),
+    dispatchedAt: _nullableDateTime(map['dispatched_at']),
+    receivedAt: _nullableDateTime(map['received_at']),
+    cancelledAt: _nullableDateTime(map['cancelled_at']),
+  );
+}
+
 class DashboardStats {
   const DashboardStats({
     required this.totalMedicines,

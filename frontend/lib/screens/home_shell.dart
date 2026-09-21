@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../core/app_theme.dart';
 import '../state/app_controller.dart';
 import 'branches_screen.dart';
+import 'branch_orders_screen.dart';
 import 'dashboard_screen.dart';
 import 'inventory_screen.dart';
 import 'purchases_screen.dart';
@@ -52,6 +53,12 @@ class HomeShell extends StatelessWidget {
       icon: Icons.support_agent_outlined,
       selectedIcon: Icons.support_agent_rounded,
       subtitle: 'Help and system status',
+    ),
+    _AppDestination(
+      label: 'Orders',
+      icon: Icons.local_shipping_outlined,
+      selectedIcon: Icons.local_shipping_rounded,
+      subtitle: 'Branch requests and transfers',
     ),
   ];
 
@@ -218,7 +225,8 @@ class HomeShell extends StatelessWidget {
     final indices = <int>[
       4,
       5,
-      if (controller.isAdmin) ...[6, 7],
+      6,
+      if (controller.isAdmin) ...[7, 8],
     ];
     final selected = await showModalBottomSheet<int>(
       context: context,
@@ -441,6 +449,10 @@ class _WorkspaceBodyState extends State<_WorkspaceBody> {
       ),
       SupportScreen(
         key: const PageStorageKey<String>('support'),
+        controller: controller,
+      ),
+      BranchOrdersScreen(
+        key: const PageStorageKey<String>('orders'),
         controller: controller,
       ),
       if (controller.isAdmin)

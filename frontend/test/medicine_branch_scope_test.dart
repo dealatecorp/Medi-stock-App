@@ -33,7 +33,7 @@ void main() {
     await temporaryDirectory.delete(recursive: true);
   });
 
-  testWidgets('staff inventory is limited to its branch and branch is fixed', (
+  testWidgets('staff sees all branches but can edit only its own branch', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(393, 850);
@@ -80,9 +80,10 @@ void main() {
       );
       expect(await controller.loginStaff('city@example.com', '1234'), isTrue);
       expect(controller.staffBranch, 'City Branch');
-      expect(controller.medicines.map((medicine) => medicine.name), <String>[
-        'Own branch tablets',
-      ]);
+      expect(
+        controller.medicines.map((medicine) => medicine.name),
+        containsAll(<String>['Own branch tablets', 'Other branch tablets']),
+      );
       expect(await controller.lookupBarcode(foreignMedicine.barcode), isNull);
       expect(() => controller.addToCart(foreign, 1), throwsStateError);
       await expectLater(
@@ -100,7 +101,21 @@ void main() {
       ),
     );
     expect(find.text('Own branch tablets'), findsOneWidget);
-    expect(find.text('Other branch tablets'), findsNothing);
+    expect(find.text('Other branch tablets'), findsOneWidget);
+    final foreignCard = find
+        .ancestor(
+          of: find.text('Other branch tablets'),
+          matching: find.byType(Card),
+        )
+        .first;
+    expect(
+      find.descendant(of: foreignCard, matching: find.byTooltip('Edit')),
+      findsNothing,
+    );
+    expect(
+      find.descendant(of: foreignCard, matching: find.byTooltip('Delete')),
+      findsNothing,
+    );
     unawaited(
       showMedicineFormSheet(
         tester.element(find.byType(InventoryScreen)),

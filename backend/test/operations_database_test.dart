@@ -162,14 +162,19 @@ void main() {
     expect(summaries.first.stockValuePaise, 3000);
 
     final database = await AppDatabase.instance.database;
-    expect(await database.getVersion(), 4);
+    expect(await database.getVersion(), 5);
     final tables = await database.rawQuery(
       "SELECT name FROM sqlite_master WHERE type = 'table'",
     );
     final tableNames = tables.map((row) => row['name']);
     expect(
       tableNames,
-      containsAll(<String>['branches', 'staff', 'staff_attendance']),
+      containsAll(<String>[
+        'branches',
+        'staff',
+        'staff_attendance',
+        'branch_orders',
+      ]),
     );
   });
 
@@ -195,7 +200,7 @@ void main() {
     await legacy.close();
 
     final upgraded = await AppDatabase.instance.database;
-    expect(await upgraded.getVersion(), 4);
+    expect(await upgraded.getVersion(), 5);
     final rows = await upgraded.query('staff');
     expect(rows.single['shift'], 'A');
   });
